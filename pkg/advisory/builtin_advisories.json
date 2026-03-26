@@ -1,0 +1,58 @@
+{
+  "schema_version": "1.0.0",
+  "last_updated": "2026-03-26T00:00:00Z",
+  "advisories": [
+    {
+      "id": "ABOM-2026-001",
+      "title": "Trivy GitHub Actions supply chain compromise",
+      "cve": "CVE-2026-33634",
+      "cvss": 9.4,
+      "published": "2026-03-19",
+      "updated": "2026-03-26",
+      "status": "active",
+      "description": "Threat actor TeamPCP compromised Trivy's release automation, force-pushing credential-stealing payloads to 76 of 77 trivy-action tags and all setup-trivy tags.",
+      "references": [
+        "https://github.com/aquasecurity/trivy/security/advisories/GHSA-69fq-xp46-6x23",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-33634"
+      ],
+      "affected_actions": [
+        {
+          "uses": "aquasecurity/trivy-action",
+          "tool_names": ["trivy"],
+          "affected_refs": {
+            "tag_range": ">=v0.0.1 <=v0.34.2",
+            "safe_tags": ["v0.35.0"],
+            "safe_shas": []
+          },
+          "affected_period": {
+            "from": "2026-03-19",
+            "to": null
+          }
+        },
+        {
+          "uses": "aquasecurity/setup-trivy",
+          "tool_names": ["trivy"],
+          "affected_refs": {
+            "tag_range": ">=v0.2.0 <=v0.2.5",
+            "safe_tags": ["v0.2.6"],
+            "safe_shas": []
+          },
+          "affected_period": {
+            "from": "2026-03-19",
+            "to": null
+          }
+        }
+      ],
+      "indicators": {
+        "docker_images": ["aquasec/trivy:0.69.4"],
+        "repos_to_check": ["tpcp-docs"],
+        "notes": "Presence of a repo named tpcp-docs in your org may indicate the fallback exfiltration mechanism was triggered."
+      },
+      "recommended_actions": [
+        "Pin to commit SHA or update to safe tag",
+        "Rotate all secrets accessible to affected CI pipelines",
+        "Audit downstream artifacts built during affected period"
+      ]
+    }
+  ]
+}
