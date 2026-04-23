@@ -145,8 +145,9 @@ func runScan(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check advisories
+	var db *advisory.Database
 	if checkAdvisory {
-		db := advisory.NewDatabase(advisory.LoadOptions{
+		db = advisory.NewDatabase(advisory.LoadOptions{
 			Offline: offline,
 			NoCache: noCache,
 			Quiet:   quiet,
@@ -162,6 +163,21 @@ func runScan(cmd *cobra.Command, args []string) error {
 			fmt.Fprintln(os.Stderr, "Resolving tag and branch refs to commit SHAs...")
 		}
 		resolver.ResolveABOMRefs(abom, resolver.NewGitHubRefResolver(githubToken), col)
+	}
+
+	// Resolve tags for advisory-flagged SHA refs so version comparison can
+	// clear false positives. Gated on --check (not --verify-shas) because
+	// tag resolution uses git ls-remote, which doesn't consume REST API
+	// quota — safe to run even without explicit opt-in to SHA verification.
+	// Runs before --verify-shas when both are set: SHA verification makes
+	// ~30 HEAD requests and can trigger secondary rate limits, while tag
+	// resolution only needs 0-2 calls (one per flagged ref).
+	if checkAdvisory && !offline && !noNetwork {
+		if !quiet {
+			fmt.Fprintln(os.Stderr, "Resolving advisory-flagged SHAs to upstream tags...")
+		}
+		resolver.ResolveABOMTags(abom, resolver.NewGitHubTagResolver(githubToken), col)
+		db.RecheckSHARefs(abom)
 	}
 
 	if verifyShas {

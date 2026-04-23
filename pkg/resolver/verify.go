@@ -3,6 +3,9 @@ package resolver
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/julietsecurity/abom/pkg/model"
@@ -154,6 +157,133 @@ func VerifyABOMShas(abom *model.ABOM, v SHAVerifier, col *warnings.Collector) {
 				Message:  fmt.Sprintf("SHA not reachable from %s/%s refs (may be fork-only or force-pushed away)", ref.Owner, ref.Repo),
 			})
 		}
+	}
+}
+
+// TagResolver resolves a commit SHA to the tag(s) that point at it.
+type TagResolver interface {
+	// ResolveTag returns the best matching tag for a commit SHA in owner/repo,
+	// or "" if no tag points at this commit. "Best" prefers semver-shaped tags
+	// (e.g., "v1.2.3") over arbitrary tags.
+	ResolveTag(owner, repo, sha string) (tag string, err error)
+}
+
+// GitHubTagResolver resolves a SHA to its tag via git ls-remote.
+type GitHubTagResolver struct {
+	token string
+}
+
+func NewGitHubTagResolver(token string) *GitHubTagResolver {
+	return &GitHubTagResolver{token: token}
+}
+
+func (r *GitHubTagResolver) ResolveTag(owner, repo, sha string) (string, error) {
+	// Use git ls-remote to list tags. This uses the git protocol, not the
+	// REST API, so it doesn't consume API rate limit quota — critical for
+	// CI environments where the GITHUB_TOKEN budget is shared across
+	// workflows.
+	repoURL := fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
+
+	args := []string{"ls-remote", "--tags", repoURL}
+	if r.token != "" {
+		// Pass token via http.extraHeader — same mechanism actions/checkout uses.
+		// Trade-off: the token is visible in the process argument list (ps/procfs).
+		// A GIT_ASKPASS credential helper would avoid that, but adds complexity
+		// for little gain in CI where the token is already in the environment.
+		args = append([]string{"-c", fmt.Sprintf("http.extraHeader=Authorization: token %s", r.token)}, args...)
+	}
+
+	cmd := exec.Command("git", args...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git ls-remote failed: %w", err)
+	}
+
+	// Parse output: each line is "<sha>\trefs/tags/<name>"
+	// Annotated tags also have "<sha>\trefs/tags/<name>^{}" lines where
+	// the SHA is the dereferenced commit. Prefer ^{} entries.
+	tagsBySHA := make(map[string]string)
+	for _, line := range strings.Split(string(out), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) != 2 {
+			continue
+		}
+		tagSHA := parts[0]
+		ref := parts[1]
+		if !strings.HasPrefix(ref, "refs/tags/") {
+			continue
+		}
+		name := strings.TrimPrefix(ref, "refs/tags/")
+		if strings.HasSuffix(name, "^{}") {
+			// Dereferenced annotated tag — the SHA is the commit SHA.
+			name = strings.TrimSuffix(name, "^{}")
+			tagsBySHA[tagSHA] = name
+		} else if _, exists := tagsBySHA[tagSHA]; !exists {
+			// Lightweight tag or annotated tag object SHA.
+			tagsBySHA[tagSHA] = name
+		}
+	}
+
+	if tag, ok := tagsBySHA[sha]; ok {
+		return tag, nil
+	}
+	return "", nil
+}
+
+// ResolveABOMTags iterates SHA-pinned actions and resolves each to its
+// upstream tag via the GitHub API. Stores the result in ActionRef.ResolvedTag.
+//
+// This should run after VerifyABOMShas so that unreachable SHAs are already
+// flagged and we only spend API calls on verified commits.
+func ResolveABOMTags(abom *model.ABOM, r TagResolver, col *warnings.Collector) {
+	if abom == nil || r == nil || col == nil {
+		return
+	}
+
+	type cacheKey struct {
+		owner, repo, sha string
+	}
+	cache := make(map[cacheKey]string)
+
+	for _, ref := range abom.Actions {
+		if ref.RefType != model.RefTypeSHA {
+			continue
+		}
+		if !ref.Compromised {
+			continue
+		}
+		switch ref.ActionType {
+		case model.ActionTypeDocker, model.ActionTypeLocal:
+			continue
+		}
+		if ref.Owner == "" || ref.Repo == "" || ref.Ref == "" {
+			continue
+		}
+		if len(ref.Ref) < 40 {
+			continue
+		}
+
+		key := cacheKey{ref.Owner, ref.Repo, ref.Ref}
+		if tag, ok := cache[key]; ok {
+			ref.ResolvedTag = tag
+			continue
+		}
+
+		tag, err := r.ResolveTag(ref.Owner, ref.Repo, ref.Ref)
+		if err != nil {
+			col.Emit(warnings.Warning{
+				Category: warnings.CategoryRateLimit,
+				Subject:  subjectFor(ref),
+				Message:  "tag resolution failed (treat as advisory)",
+				Err:      err,
+			})
+			continue
+		}
+
+		cache[key] = tag
+		ref.ResolvedTag = tag
 	}
 }
 
